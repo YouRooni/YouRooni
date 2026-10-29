@@ -1,9 +1,11 @@
-# Собирает SVG для профиля: шапку и карточки проектов, светлую и тёмную версии.
-# Стиль как на rooni.dev: монохром, соединённые плитки, DM Sans / DM Mono.
-# Запуск: python scripts/build.py (нужен fonttools). Данные берёт из публичного API GitHub.
+# Собирает SVG для профиля: шапку, плитки-ссылки и карточки проектов, светлую и тёмную версии.
+# Стиль как на rooni.dev: монохром, соединённые плитки, DM Sans / DM Mono,
+# формы M3E из shapes.js и пиксельный Bayer-фон из bgFx.js.
+# Запуск: python scripts/build.py (нужны fonttools и pillow). Данные берёт из публичного API GitHub.
 import base64
 import io
 import json
+import math
 import os
 import re
 import urllib.error
@@ -14,6 +16,9 @@ from xml.sax.saxutils import escape
 from fontTools import subset
 from fontTools.ttLib import TTFont
 from fontTools.varLib import instancer
+from PIL import Image
+
+import shapes
 
 ROOT = Path(__file__).resolve().parent.parent
 USER = "YouRooni"
@@ -24,35 +29,44 @@ HERO = {
         "Developer and a bit of a designer.",
         "Разработчик и немного дизайнер.",
     ],
-    "buttons": [("Telegram", True), ("rooni.dev", False)],
+    "stack": ["Kotlin", "Python", "Java", "TypeScript"],
 }
 
+LINKS = [
+    {"slug": "telegram", "icon": "send", "shape": "cookie6", "hover": "sunny",
+     "label": "Telegram", "value": "@YouRooni"},
+    {"slug": "channel", "icon": "campaign", "shape": "cookie9", "hover": "flower",
+     "label": "Channel", "value": "@RnPlugins"},
+    {"slug": "site", "icon": "language", "shape": "cookie4", "hover": "clover4",
+     "label": "Website", "value": "rooni.dev"},
+]
+
 PROJECTS = [
-    {"repo": "Maxli", "icon": "smart_toy", "shape": "cookie-12",
+    {"repo": "Maxli", "icon": "smart_toy", "shape": "cookie12", "hover": "burst",
      "desc": "Userbot for the MAX messenger: automation and custom scripts."},
-    {"repo": "Wallify-Repo", "title": "Wallify", "icon": "wallpaper", "shape": "cookie-6",
+    {"repo": "Wallify-Repo", "title": "Wallify", "icon": "wallpaper", "shape": "cookie6", "hover": "sunny",
      "desc": "Android app for live wallpapers in HTML, CSS and JS."},
-    {"repo": "AovoControl", "icon": "electric_scooter", "shape": "cookie-9",
+    {"repo": "AovoControl", "icon": "electric_scooter", "shape": "cookie9", "hover": "flower",
      "desc": "Control AOVO e-scooters over Bluetooth: speed, lights, settings."},
-    {"repo": "plugins", "title": "exteraGram plugins", "icon": "extension", "shape": "cookie-7",
+    {"repo": "plugins", "title": "exteraGram plugins", "icon": "extension", "shape": "cookie4", "hover": "clover4",
      "desc": "Plugins for exteraGram and other Telegram clients."},
 ]
 
 # Токены rooni.dev. Плитка в светлой чуть темнее, иначе теряется на белом фоне GitHub
 THEMES = {
     "dark": {
-        "tile": "#1d1d1d", "pill": "#303030", "dots": "#e6e6e6",
-        "primary": "#e4e4e4", "on_primary": "#181818",
+        "tile": "#1d1d1d", "pill": "#303030", "primary": (228, 228, 228), "fx": 0.11,
         "text": "#e6e6e6", "variant": "#a8a8a8", "muted": "#7b7b7b",
     },
     "light": {
-        "tile": "#f2f2f2", "pill": "#e2e2e2", "dots": "#1a1a1a",
-        "primary": "#1c1c1c", "on_primary": "#f4f4f4",
+        "tile": "#f2f2f2", "pill": "#e2e2e2", "primary": (28, 28, 28), "fx": 0.07,
         "text": "#1a1a1a", "variant": "#5d5d5d", "muted": "#8a8a8a",
     },
 }
 
 OUTER, INNER = 26, 6
+LOOP = 9  # секунд, общий цикл всех анимаций
+REDUCE = "@media (prefers-reduced-motion:reduce){.fx-a{display:none}.fx-s{display:inline}}"
 
 
 def api(path):
@@ -83,12 +97,12 @@ class Font:
         self.cmap = f.getBestCmap()
         self.hmtx = f["hmtx"]
 
-    def width(self, text, size, spacing=0):
+    def width(self, text, size):
         units = 0
         for ch in text:
             g = self.cmap.get(ord(ch))
             units += self.hmtx[g][0] if g else self.upm * 0.5
-        return units * size / self.upm + spacing * len(text)
+        return units * size / self.upm
 
     def woff(self, text):
         # Режем шрифт до нужных букв, woff на zlib (brotli не нужен)
@@ -139,23 +153,13 @@ def wrap(text, font, size, max_w):
     return lines
 
 
-# --- формы и иконки -------------------------------------------------------
-
-def path_of(folder, name):
-    svg = (ROOT / folder / f"{name}.svg").read_text(encoding="utf-8")
-    return re.search(r'\bd="([^"]+)"', svg).group(1)
-
+# --- примитивы ------------------------------------------------------------
 
 def icon(name, x, y, size, color):
     # Material Symbols рисуются в системе 0..960 со сдвигом -960 по Y
-    k = size / 960
-    return (f'<path transform="translate({x} {y + size}) scale({k})" '
-            f'd="{path_of("icons", name)}" fill="{color}"/>')
-
-
-def shape(name, x, y, size, color):
-    k = size / 100
-    return f'<path transform="translate({x} {y}) scale({k})" d="{path_of("shapes", name)}" fill="{color}"/>'
+    svg = (ROOT / "icons" / f"{name}.svg").read_text(encoding="utf-8")
+    d = re.search(r'\bd="([^"]+)"', svg).group(1)
+    return f'<path transform="translate({x} {y + size}) scale({size / 960})" d="{d}" fill="{color}"/>'
 
 
 def rect(x, y, w, h, tl, tr, br, bl):
@@ -166,68 +170,172 @@ def rect(x, y, w, h, tl, tr, br, bl):
             f"V{y + tl}A{tl},{tl} 0 0 1 {x + tl},{y}Z")
 
 
+def morph_pill(base, hover, x, y, size, color, begin):
+    # Подложка иконки дышит как на сайте при наведении: base -> hover с пружиной и обратно
+    turn = math.pi / 6
+    frames = [(0, 0), (.34, 0), (.42, 1.12), (.47, 1), (.84, 1), (.91, -.06), (.96, 0), (1, 0)]
+    values = ";".join(shapes.blend(base, hover, t, x, y, size, turn * max(0, min(t, 1)))
+                      for _, t in frames)
+    times = ";".join(str(k) for k, _ in frames)
+    splines = ";".join([".3 0 .2 1"] * (len(frames) - 1))
+    return (f'<path d="{shapes.blend(base, hover, 0, x, y, size)}" fill="{color}">'
+            f'<animate attributeName="d" dur="{LOOP}s" begin="{begin}s" repeatCount="indefinite" '
+            f'calcMode="spline" keyTimes="{times}" keySplines="{splines}" values="{values}"/></path>')
+
+
 def svg_doc(w, h, label, css, body):
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" '
             f'viewBox="0 0 {w} {h}" role="img" aria-label="{escape(label)}">'
             f'<title>{escape(label)}</title><style>{css}</style>{body}</svg>')
 
 
+def corners_for(row, col, rows, cols):
+    # Группа плиток: внешние углы 26px, на стыках 6px
+    pick = lambda cond: OUTER if cond else INNER
+    top, bottom, left, right = row == 0, row == rows - 1, col == 0, col == cols - 1
+    return (pick(top and left), pick(top and right), pick(bottom and right), pick(bottom and left))
+
+
+# --- пиксельный фон -------------------------------------------------------
+
+BAYER = [(v + .5) / 16 for v in (0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5)]
+LEVELS = 5
+CELL = 5
+FRAMES = 36
+
+
+def _smooth(a, b, x):
+    t = min(1, max(0, (x - a) / (b - a)))
+    return t * t * (3 - 2 * t)
+
+
+def _hash(x, y, s):
+    h = (x * 374761393 + y * 668265263 + s * 2147483647) & 0xFFFFFFFF
+    h = ((h ^ (h >> 13)) * 1274126177) & 0xFFFFFFFF
+    return (h ^ (h >> 16)) / 4294967295
+
+
+def dither_frames(w, h, rgb, alpha):
+    # Тот же «дым» из трёх блобов, что в hero на rooni.dev, только зациклен по фазе
+    gw, gh = math.ceil(w / CELL), math.ceil(h / CELL)
+    aspect = gw / gh
+    out = []
+    for f in range(FRAMES):
+        th = f / FRAMES * math.tau
+        b1x, b1y = aspect * (.8 + .05 * math.sin(th)), .2 + .05 * math.cos(th)
+        b2x, b2y = aspect * (.12 + .05 * math.sin(th + 1)), .5 + .05 * math.cos(2 * th)
+        b3x = aspect * (.5 + .06 * math.sin(th + 2))
+        img = Image.new("RGBA", (gw, gh))
+        px = img.load()
+        for y in range(gh):
+            Y = y / gh
+            row = 1 - _smooth(.3, 1, Y)
+            for x in range(gw):
+                X = x / gw * aspect
+                hv = max(0, math.exp(-((X - b1x) ** 2 + (Y - b1y) ** 2) / .3)
+                         + .7 * math.exp(-((X - b2x) ** 2 + (Y - b2y) ** 2) / .25)
+                         + .5 * math.exp(-((X - b3x) ** 2 + Y ** 2) / .2)
+                         + .07 * math.sin(X * 7 + Y * 4 + th)) * row
+                q = math.floor(min(1.25, hv) * LEVELS + BAYER[(y & 3) * 4 + (x & 3)])
+                a = min(q, LEVELS * 1.25) / LEVELS * alpha
+                # Редкий «иней»: пиксели вспыхивают и гаснут, два цикла за петлю
+                cyc = 2 * f / FRAMES + _hash(x, y, 1)
+                cycle = math.floor(cyc)
+                if row > .05 and _hash(x, y, 7 + cycle % 2) > .985:
+                    a += .6 * alpha * math.sin(math.pi * (cyc - cycle)) ** 2 * row
+                px[x, y] = (*rgb, round(min(1, a) * 255))
+        # Кадр храним в размер сетки, растягивает браузер без сглаживания (image-rendering)
+        buf = io.BytesIO()
+        img.save(buf, "PNG", optimize=True)
+        out.append("data:image/png;base64," + base64.b64encode(buf.getvalue()).decode())
+    return out, gw * CELL, gh * CELL
+
+
 # --- шапка ---------------------------------------------------------------
 
 def hero(theme, avatar_uri):
     t = THEMES[theme]
-    w, h = 840, 300
-    name, lines, buttons = HERO["name"], HERO["lines"], HERO["buttons"]
+    w, h = 840, 280
+    name, lines, stack = HERO["name"], HERO["lines"], HERO["stack"]
 
-    # Пара кнопок как hero-cta на сайте: у стыка 6px, снаружи 24px
-    bx, by, bh, btn_svg = 40, 216, 48, []
-    for i, (label, filled) in enumerate(buttons):
-        tw = SEMIBOLD.width(label, 15)
-        bw = tw + 48 + (26 if filled else 0)
-        rl = 24 if i == 0 else INNER
-        rr = 24 if i == len(buttons) - 1 else INNER
-        fill = t["primary"] if filled else t["pill"]
-        fg = t["on_primary"] if filled else t["text"]
-        btn_svg.append(f'<path d="{rect(bx, by, bw, bh, rl, rr, rr, rl)}" fill="{fill}"/>'
-                       f'<text x="{bx + 24}" y="{by + 29.5}" font-size="15" font-weight="600" '
-                       f'fill="{fg}">{escape(label)}</text>')
-        if filled:
-            btn_svg.append(icon("arrow_outward", bx + 24 + tw + 8, by + 15, 18, fg))
-        bx += bw + 3
+    frames, fw, fh = dither_frames(w, h, t["primary"], t["fx"])
+    n = len(frames)
+    fx = []
+    for i, uri in enumerate(frames):
+        vals = ";".join("1" if k == i else "0" for k in range(n))
+        fx.append(f'<image class="px" href="{uri}" preserveAspectRatio="none" width="{fw}" height="{fh}" opacity="{1 if i == 0 else 0}">'
+                  f'<animate attributeName="opacity" dur="{LOOP}s" repeatCount="indefinite" '
+                  f'calcMode="discrete" values="{vals}"/></image>')
 
     lines_svg = "".join(
-        f'<text x="42" y="{160 + i * 26}" font-size="17" fill="{t["variant"]}">{escape(l)}</text>'
+        f'<text x="42" y="{150 + i * 26}" font-size="17" fill="{t["variant"]}">{escape(l)}</text>'
         for i, l in enumerate(lines))
 
-    ava, size = 560, 240
-    css = font_css("".join(lines), name + "".join(b for b, _ in buttons), "")
+    # Стек соединёнными чипами: снаружи 16px, на стыках 5px
+    cx, chips = 40, []
+    for i, s in enumerate(stack):
+        cw = MONO_F.width(s, 13) + 28
+        rl = 16 if i == 0 else 5
+        rr = 16 if i == len(stack) - 1 else 5
+        chips.append(f'<path d="{rect(cx, 202, cw, 34, rl, rr, rr, rl)}" fill="{t["pill"]}"/>'
+                     f'<text class="m" x="{cx + 14}" y="223.5" font-size="13" fill="{t["variant"]}">{s}</text>')
+        cx += cw + 3
+
+    # Ава как на сайте: скругление 30%, по циклу становится кругом и чуть поворачивается
+    ax, ay, size = 590, 30, 220
+    r0, r1 = size * .3, size / 2
+    c = (ax + size / 2, ay + size / 2)
+    ava = (
+        f'<clipPath id="ava"><rect x="{ax}" y="{ay}" width="{size}" height="{size}" rx="{r0}">'
+        f'<animate attributeName="rx" dur="{LOOP}s" repeatCount="indefinite" calcMode="spline" '
+        f'keyTimes="0;.5;.57;.9;.96;1" keySplines=".3 0 .2 1;.3 0 .2 1;.3 0 .2 1;.3 0 .2 1;.3 0 .2 1" '
+        f'values="{r0};{r0};{r1};{r1};{r0};{r0}"/></rect></clipPath>'
+    )
+    rot = (f'<animateTransform attributeName="transform" type="rotate" dur="{LOOP}s" '
+           f'repeatCount="indefinite" calcMode="spline" keyTimes="0;.5;.56;.6;.9;.95;.98;1" '
+           f'keySplines="{";".join([".3 0 .2 1"] * 7)}" '
+           f'values="0 {c[0]} {c[1]};0 {c[0]} {c[1]};-5.5 {c[0]} {c[1]};-4 {c[0]} {c[1]};'
+           f'-4 {c[0]} {c[1]};1 {c[0]} {c[1]};0 {c[0]} {c[1]};0 {c[0]} {c[1]}"/>')
+
+    css = (font_css("".join(lines), name, "".join(stack)) + ".fx-s{display:none}" + REDUCE
+           + "image.px{image-rendering:crisp-edges;image-rendering:pixelated}")
     body = (
-        "<defs>"
-        # Точечный «дизеринг» как фон rooni.dev, гаснет к правому краю
-        '<pattern id="dots" width="6" height="6" patternUnits="userSpaceOnUse">'
-        f'<rect width="2" height="2" fill="{t["dots"]}"/></pattern>'
-        '<radialGradient id="fade" cx=".22" cy=".1" r=".8">'
-        '<stop offset="0" stop-color="#fff" stop-opacity=".16"/>'
-        '<stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>'
-        f'<mask id="m"><rect width="{w}" height="{h}" fill="url(#fade)"/></mask>'
-        f'<clipPath id="ava"><path transform="translate({ava} 30) scale({size / 100})" '
-        f'd="{path_of("shapes", "squircle")}"/></clipPath>'
-        "</defs>"
+        f'<defs><clipPath id="tile"><rect width="{w}" height="{h}" rx="{OUTER}"/></clipPath>{ava}</defs>'
         f'<rect width="{w}" height="{h}" rx="{OUTER}" fill="{t["tile"]}"/>'
-        f'<rect width="{w}" height="{h}" rx="{OUTER}" fill="url(#dots)" mask="url(#m)"/>'
-        f'<text x="36" y="124" font-size="100" font-weight="600" letter-spacing="-4" '
+        f'<g clip-path="url(#tile)">'
+        f'<g class="fx-a">{"".join(fx)}</g>'
+        f'<image class="fx-s px" href="{frames[0]}" preserveAspectRatio="none" width="{fw}" height="{fh}"/></g>'
+        f'<text x="36" y="118" font-size="100" font-weight="600" letter-spacing="-4" '
         f'fill="{t["text"]}">{escape(name)}</text>'
-        + lines_svg + "".join(btn_svg)
-        + shape("squircle", ava, 30, size, t["pill"])
-        + f'<image href="{avatar_uri}" x="{ava}" y="30" width="{size}" height="{size}" '
-          'preserveAspectRatio="xMidYMid slice" clip-path="url(#ava)"/>'
+        + lines_svg + "".join(chips)
+        + f'<g>{rot}<g clip-path="url(#ava)">'
+          f'<rect x="{ax}" y="{ay}" width="{size}" height="{size}" fill="#fff"/>'
+          f'<image href="{avatar_uri}" x="{ax}" y="{ay}" width="{size}" height="{size}" '
+          'preserveAspectRatio="xMidYMid slice"/></g></g>'
     )
     return svg_doc(w, h, f"{name}. {lines[0]}", css, body)
 
 
+# --- плитки-ссылки -------------------------------------------------------
+
+def link_tile(theme, link, i, total):
+    t = THEMES[theme]
+    w, h = 276, 84
+    css = font_css(link["label"], link["value"], "")
+    body = (
+        f'<path d="{rect(0, 0, w, h, *corners_for(0, i, 1, total))}" fill="{t["tile"]}"/>'
+        + morph_pill(link["shape"], link["hover"], 20, 20, 44, t["pill"], i * .5)
+        + icon(link["icon"], 31, 31, 22, t["text"])
+        + f'<text x="80" y="37" font-size="12.5" fill="{t["muted"]}">{escape(link["label"])}</text>'
+        + f'<text x="80" y="58" font-size="15.5" font-weight="600" fill="{t["text"]}">{escape(link["value"])}</text>'
+        + icon("arrow_outward", w - 22 - 20, 31, 20, t["variant"])
+    )
+    return svg_doc(w, h, f'{link["label"]}: {link["value"]}', css, body)
+
+
 # --- карточки проектов ----------------------------------------------------
 
-def card(theme, p, info, corners):
+def card(theme, p, info, i, total):
     t = THEMES[theme]
     w, h = 416, 212
     title = p.get("title", p["repo"])
@@ -237,13 +345,14 @@ def card(theme, p, info, corners):
     chip = " · ".join(x for x in (lang, f"★ {stars}" if stars else "") if x) or "GitHub"
 
     desc_svg = "".join(
-        f'<text x="28" y="{134 + i * 23}" font-size="14.5" fill="{t["variant"]}">{escape(l)}</text>'
-        for i, l in enumerate(lines))
+        f'<text x="28" y="{134 + k * 23}" font-size="14.5" fill="{t["variant"]}">{escape(l)}</text>'
+        for k, l in enumerate(lines))
 
+    row, col = divmod(i, 2)
     css = font_css(p["desc"], title, chip)
     body = (
-        f'<path d="{rect(0, 0, w, h, *corners)}" fill="{t["tile"]}"/>'
-        + shape(p["shape"], 28, 28, 48, t["pill"])
+        f'<path d="{rect(0, 0, w, h, *corners_for(row, col, (total + 1) // 2, 2))}" fill="{t["tile"]}"/>'
+        + morph_pill(p["shape"], p["hover"], 26, 26, 52, t["pill"], 1.5 + i * .5)
         + icon(p["icon"], 40, 40, 24, t["text"])
         + icon("arrow_outward", w - 28 - 22, 41, 22, t["variant"])
         + f'<text x="28" y="106" font-size="19" font-weight="600" letter-spacing="-.38" '
@@ -252,16 +361,6 @@ def card(theme, p, info, corners):
         + f'<text class="m" x="28" y="{h - 26}" font-size="13" fill="{t["variant"]}">{escape(chip)}</text>'
     )
     return svg_doc(w, h, title, css, body)
-
-
-def grid_corners(i, total, cols=2):
-    # Сетка как одна группа: внешние углы 26px, на стыках 6px
-    rows = (total + cols - 1) // cols
-    r, c = divmod(i, cols)
-    top, bottom = r == 0, r == rows - 1
-    left, right = c == 0, c == cols - 1
-    pick = lambda cond: OUTER if cond else INNER
-    return (pick(top and left), pick(top and right), pick(bottom and right), pick(bottom and left))
 
 
 def main():
@@ -281,20 +380,22 @@ def main():
         repos = json.loads(cache.read_text(encoding="utf-8"))
 
     # Аватарку отдаёт CDN без лимитов, ссылка не меняется при смене авы
-    raw, ctype = fetch(f"https://avatars.githubusercontent.com/{USER}?s=480")
+    raw, ctype = fetch(f"https://avatars.githubusercontent.com/{USER}?s=440")
     avatar = f"data:{ctype.split(';')[0]};base64,{base64.b64encode(raw).decode()}"
 
-    for theme in THEMES:
-        (out / f"hero-{theme}.svg").write_text(hero(theme, avatar), encoding="utf-8")
+    def save(name, svg):
+        (out / name).write_text(svg, encoding="utf-8")
 
-    for i, p in enumerate(PROJECTS):
-        info = repos.get(p["repo"], {})
-        slug = p["repo"].lower()
-        corners = grid_corners(i, len(PROJECTS))
-        for theme in THEMES:
-            (out / f"project-{slug}-{theme}.svg").write_text(card(theme, p, info, corners),
-                                                             encoding="utf-8")
-        print(f"{p['repo']}: {info.get('stargazers_count')} stars")
+    for theme in THEMES:
+        save(f"hero-{theme}.svg", hero(theme, avatar))
+        for i, link in enumerate(LINKS):
+            save(f"link-{link['slug']}-{theme}.svg", link_tile(theme, link, i, len(LINKS)))
+        for i, p in enumerate(PROJECTS):
+            info = repos.get(p["repo"], {})
+            save(f"project-{p['repo'].lower()}-{theme}.svg", card(theme, p, info, i, len(PROJECTS)))
+
+    for f in sorted(out.glob("*.svg")):
+        print(f"{f.name}: {f.stat().st_size // 1024} KB")
 
 
 if __name__ == "__main__":
