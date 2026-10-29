@@ -3,6 +3,7 @@
 # формы M3E из shapes.js и пиксельный Bayer-фон из bgFx.js.
 # Запуск: python scripts/build.py (нужны fonttools и pillow). Данные берёт из публичного API GitHub.
 import base64
+import hashlib
 import io
 import json
 import math
@@ -33,11 +34,11 @@ HERO = {
 }
 
 LINKS = [
-    {"slug": "telegram", "icon": "send", "shape": "cookie6", "hover": "sunny",
+    {"slug": "telegram", "url": "https://t.me/YouRooni", "icon": "send", "shape": "cookie6", "hover": "sunny",
      "label": "Telegram", "value": "@YouRooni"},
-    {"slug": "channel", "icon": "campaign", "shape": "cookie9", "hover": "flower",
+    {"slug": "channel", "url": "https://t.me/RnPlugins", "icon": "campaign", "shape": "cookie9", "hover": "flower",
      "label": "Channel", "value": "@RnPlugins"},
-    {"slug": "site", "icon": "language", "shape": "cookie4", "hover": "clover4",
+    {"slug": "site", "url": "https://rooni.dev", "icon": "language", "shape": "cookie4", "hover": "clover4",
      "label": "Website", "value": "rooni.dev"},
 ]
 
@@ -383,16 +384,43 @@ def main():
     raw, ctype = fetch(f"https://avatars.githubusercontent.com/{USER}?s=440")
     avatar = f"data:{ctype.split(';')[0]};base64,{base64.b64encode(raw).decode()}"
 
-    def save(name, svg):
+    # Хеш содержимого в имени файла: CDN GitHub кеширует raw подолгу и игнорирует ?v=,
+    # а новый путь гарантированно тянется свежим
+    names = {}
+
+    def save(key, theme, svg):
+        digest = hashlib.sha1(svg.encode()).hexdigest()[:8]
+        name = f"{key}-{theme}-{digest}.svg"
         (out / name).write_text(svg, encoding="utf-8")
+        names[key, theme] = name
 
     for theme in THEMES:
-        save(f"hero-{theme}.svg", hero(theme, avatar))
+        save("hero", theme, hero(theme, avatar))
         for i, link in enumerate(LINKS):
-            save(f"link-{link['slug']}-{theme}.svg", link_tile(theme, link, i, len(LINKS)))
+            save(f"link-{link['slug']}", theme, link_tile(theme, link, i, len(LINKS)))
         for i, p in enumerate(PROJECTS):
             info = repos.get(p["repo"], {})
-            save(f"project-{p['repo'].lower()}-{theme}.svg", card(theme, p, info, i, len(PROJECTS)))
+            save(f"project-{p['repo'].lower()}", theme, card(theme, p, info, i, len(PROJECTS)))
+
+    def pic(key, alt, width):
+        return (f'<picture><source media="(prefers-color-scheme: dark)" srcset="assets/{names[key, "dark"]}">'
+                f'<img src="assets/{names[key, "light"]}" width="{width}" alt="{escape(alt)}"></picture>')
+
+    links = "&nbsp;".join(
+        f'<a href="{l["url"]}">{pic("link-" + l["slug"], l["label"] + ": " + l["value"], "32.6%")}</a>'
+        for l in LINKS)
+    cards = [f'<a href="https://github.com/{USER}/{p["repo"]}">'
+             f'{pic("project-" + p["repo"].lower(), p.get("title", p["repo"]), "49.6%")}</a>'
+             for p in PROJECTS]
+    grid = "<br>".join("&nbsp;".join(cards[i:i + 2]) for i in range(0, len(cards), 2))
+    readme = "\n\n".join([
+        '<div align="center">',
+        pic("hero", f'{HERO["name"]}. {HERO["lines"][0]}', "100%"),
+        links,
+        grid,
+        "</div>",
+    ]) + "\n"
+    (ROOT / "README.md").write_text(readme, encoding="utf-8", newline="\n")
 
     for f in sorted(out.glob("*.svg")):
         print(f"{f.name}: {f.stat().st_size // 1024} KB")
