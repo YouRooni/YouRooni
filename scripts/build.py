@@ -43,14 +43,19 @@ LINKS = [
 ]
 
 PROJECTS = [
-    {"repo": "Maxli", "icon": "smart_toy", "shape": "cookie12", "hover": "burst",
+    {"repo": "Zefir", "icon": "vpn_lock", "shape": "cookie6", "hover": "sunny",
+     "desc": "Clean, expressive VPN client: fast, private and modern."},
+    {"repo": "Elys", "owner": "ZavozDevs", "url": "https://github.com/ZavozDevs/Elys",
+     "icon": "terminal", "shape": "cookie12", "hover": "burst",
+     "desc": "Modular Telegram userbot: fast, feature-rich, Telethon and Hikka compatible."},
+    {"repo": "Maxli", "icon": "smart_toy", "shape": "cookie4", "hover": "clover4",
      "desc": "Userbot for the MAX messenger: automation and custom scripts."},
-    {"repo": "Wallify-Repo", "title": "Wallify", "icon": "wallpaper", "shape": "cookie6", "hover": "sunny",
-     "desc": "Android app for live wallpapers in HTML, CSS and JS."},
     {"repo": "AovoControl", "icon": "electric_scooter", "shape": "cookie9", "hover": "flower",
      "desc": "Control AOVO e-scooters over Bluetooth: speed, lights, settings."},
-    {"repo": "plugins", "title": "exteraGram plugins", "icon": "extension", "shape": "cookie4", "hover": "clover4",
-     "desc": "Plugins for exteraGram and other Telegram clients."},
+    {"repo": "gatewatch", "icon": "radar", "shape": "cookie7", "hover": "softburst",
+     "desc": "Infrastructure event pipeline: pluggable sources, channels and actions."},
+    {"repo": "Wallify-Repo", "title": "Wallify", "icon": "wallpaper", "shape": "clover8", "hover": "burst",
+     "desc": "Android app for live wallpapers in HTML, CSS and JS."},
 ]
 
 # Токены rooni.dev. Плитка в светлой чуть темнее, иначе теряется на белом фоне GitHub
@@ -372,13 +377,29 @@ def main():
 
     # Один запрос на все репо; если API отвалился (лимит), берём прошлый ответ
     cache = ROOT / "tmp" / "repos.json"
+    repos = {}
+    if cache.exists():
+        try:
+            repos = json.loads(cache.read_text(encoding="utf-8"))
+        except Exception:
+            pass
     try:
-        repos = {r["name"]: r for r in api(f"users/{USER}/repos?per_page=100")}
-        cache.parent.mkdir(exist_ok=True)
-        cache.write_text(json.dumps(repos), encoding="utf-8")
+        user_repos = {r["name"]: r for r in api(f"users/{USER}/repos?per_page=100")}
+        repos.update(user_repos)
     except urllib.error.HTTPError as e:
         print(f"API: {e}, using cache")
-        repos = json.loads(cache.read_text(encoding="utf-8"))
+
+    for p in PROJECTS:
+        owner = p.get("owner", USER)
+        repo_name = p["repo"]
+        if repo_name not in repos or not repos[repo_name].get("stargazers_count"):
+            try:
+                repos[repo_name] = api(f"repos/{owner}/{repo_name}")
+            except Exception as e:
+                print(f"API {owner}/{repo_name}: {e}")
+
+    cache.parent.mkdir(exist_ok=True)
+    cache.write_text(json.dumps(repos), encoding="utf-8")
 
     # Аватарку отдаёт CDN без лимитов, ссылка не меняется при смене авы
     raw, ctype = fetch(f"https://avatars.githubusercontent.com/{USER}?s=440")
@@ -409,8 +430,14 @@ def main():
     links = "&nbsp;".join(
         f'<a href="{l["url"]}">{pic("link-" + l["slug"], l["label"] + ": " + l["value"], "32.6%")}</a>'
         for l in LINKS)
-    cards = [f'<a href="https://github.com/{USER}/{p["repo"]}">'
-             f'{pic("project-" + p["repo"].lower(), p.get("title", p["repo"]), "49.6%")}</a>'
+    def project_url(p):
+        if "url" in p:
+            return p["url"]
+        owner = p.get("owner", USER)
+        return f"https://github.com/{owner}/{p['repo']}"
+
+    cards = [f'<a href="{project_url(p)}">'
+             f'{pic("project-" + p["repo"].lower(), p.get("title", p["repo"]), "49%")}</a>'
              for p in PROJECTS]
     grid = "<br>".join("&nbsp;".join(cards[i:i + 2]) for i in range(0, len(cards), 2))
     readme = "\n\n".join([
